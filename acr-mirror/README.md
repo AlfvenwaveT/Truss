@@ -20,9 +20,10 @@
    - Variables：`ACR_REGISTRY`（仓库地址，只写域名）、`ACR_NAMESPACE`（命名空间）、`ACR_REPOSITORY`（可选，一个仓库装全部时填仓库名）。
    - Secrets：`ACR_USERNAME`、`ACR_PASSWORD`（固定密码）。
    - 可选：Variable `DOCKERHUB_USERNAME` 与 Secret `DOCKERHUB_TOKEN`（Docker Hub 的访问令牌）。匿名拉取有频率限制，89 个最好登录。
-4. **运行**：Actions → `mirror-tb21-to-acr` → Run workflow。可以先在 `only` 里填 `fix-git` 试一个，再留空跑全部。
-   - 单个任务最多 6 小时，到时会停；直接再点一次，只补缺的。
-   - 跑完在运行页下载 `mirror-report`（`report.tsv`：源地址、ACR 地址、摘要、结果）。
+4. **运行**：`acr-mirror/images.txt` 在 main 上有改动时自动跑全部；也可以 Actions → `mirror-tb21-to-acr` → Run workflow 手动跑，`only` 里填题名只跑那一个。
+   - 一次运行是 8 个并行任务，每个负责清单的一份（清单按镜像从大到小排，蛇形分配，各份大小相差约 15% 以内）。某一份失败不影响其他份。
+   - 单个任务最多 6 小时，到时会停；再点一次 Run workflow，只补缺的。
+   - 每份产出一个 `mirror-report-<份号>`（里面是 `report.tsv`：源地址、ACR 地址、摘要、结果）。要给 Mac 端脚本核对摘要时，把 8 个合成一个：`cat mirror-report-*/report.tsv > report.tsv`。
 5. **Mac**：
    ```bash
    docker login --username=<ACR 用户名> <ACR_REGISTRY>

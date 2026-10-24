@@ -16,6 +16,10 @@
 name: mirror-tb21-to-acr
 
 on:
+  # A change to the list on main starts a full run; a manual run can be limited with `only`.
+  push:
+    branches: [main]
+    paths: [acr-mirror/images.txt]
   workflow_dispatch:
     inputs:
       only:
@@ -28,12 +32,22 @@ permissions:
 
 jobs:
   mirror:
+    # Eight jobs in parallel, each copying its share of the list. images.txt is ordered largest image
+    # first and dealt out in a snake order (0..7, 7..0, ...), which keeps the shares within about 15%
+    # of each other by compressed size (round 20). A failed shard does not stop the others.
+    name: mirror (shard ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
     timeout-minutes: 350  # GitHub-hosted jobs stop at 6 h; a rerun resumes from what is missing
     env:
       ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
       ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
       ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+      SHARDS: 8  # must equal the number of entries in matrix.shard
+      SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v7
 
@@ -91,12 +105,15 @@ jobs:
           ONLY: ${{ inputs.only }}
         run: |
           set -u
-          ok=0; skipped=0; failed=0
+          ok=0; skipped=0; failed=0; index=0
           printf 'source\tdestination\tdigest\tresult\n' > report.tsv
           while read -r src <&3; do   # the list comes on fd 3 so nothing in the loop can read it from stdin
             [ -z "$src" ] && continue
             case "$src" in \#*) continue ;; esac
             if [ -n "$ONLY" ] && [[ "$src" != *"$ONLY"* ]]; then continue; fi
+            pos=$(( index % (2 * SHARDS) )); index=$((index + 1))
+            [ "$pos" -lt "$SHARDS" ] || pos=$(( 2 * SHARDS - 1 - pos ))   # snake order
+            [ "$pos" -eq "$SHARD" ] || continue
             name_tag="${src##*/}"                             # docker.io/alexgshaw/fix-git:20260403 -> fix-git:20260403
             if [ -n "${ACR_REPOSITORY:-}" ]; then
               dst="$ACR_REGISTRY/$ACR_NAMESPACE/$ACR_REPOSITORY:${name_tag/:/-}"   # <registry>/<ns>/<repo>:fix-git-20260403
@@ -119,12 +136,12 @@ jobs:
               echo "::error::copy failed for $src"; failed=$((failed+1)); printf '%s\t%s\t\tcopy failed\n' "$src" "$dst" >> report.tsv
             fi
           done 3< acr-mirror/images.txt
-          echo "copied $ok, skipped $skipped, failed $failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "shard $SHARD: copied $ok, skipped $skipped, failed $failed" | tee -a "$GITHUB_STEP_SUMMARY"
           [ "$failed" -eq 0 ]
 
       - name: Upload the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: mirror-report
+          name: mirror-report-${{ matrix.shard }}
           path: report.tsv
