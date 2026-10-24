@@ -1,0 +1,91 @@
+# Copy the Terminal-Bench 2.1 task images listed in acr-mirror/images.txt from Docker Hub to Alibaba Cloud
+# Container Registry (ACR), registry to registry with skopeo. Digests are preserved, so each copy is
+# byte-for-byte the Docker Hub image. Images already in ACR are skipped, so a rerun only copies
+# what is missing or failed.
+#
+# Repository settings needed (Settings > Secrets and variables > Actions):
+#   Variables: ACR_REGISTRY   e.g. registry.cn-hangzhou.aliyuncs.com (from the ACR console's 访问凭证 page)
+#              ACR_NAMESPACE  your ACR namespace
+#   Secrets:   ACR_USERNAME   the login name shown on the 访问凭证 page
+#              ACR_PASSWORD   the fixed password set on that page
+#   Optional:  DOCKERHUB_USERNAME (variable) and DOCKERHUB_TOKEN (secret), to pull from Docker Hub
+#              as a logged-in user instead of anonymously (anonymous pulls are rate limited)
+name: mirror-tb21-to-acr
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Copy only images whose reference contains this text (empty = all)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350  # GitHub-hosted jobs stop at 6 h; a rerun resumes from what is missing
+    env:
+      ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install skopeo
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq skopeo
+          skopeo --version
+
+      - name: Log in to ACR (and Docker Hub if configured)
+        env:
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          test -n "$ACR_REGISTRY" && test -n "$ACR_NAMESPACE" || { echo "set the ACR_REGISTRY and ACR_NAMESPACE variables"; exit 1; }
+          echo "$ACR_PASSWORD" | skopeo login --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+          if [ -n "$DOCKERHUB_USERNAME" ]; then
+            echo "$DOCKERHUB_TOKEN" | skopeo login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+          fi
+
+      - name: Copy images
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          set -u
+          ok=0; skipped=0; failed=0
+          printf 'source\tdestination\tdigest\tresult\n' > report.tsv
+          while read -r src <&3; do   # the list comes on fd 3 so nothing in the loop can read it from stdin
+            [ -z "$src" ] && continue
+            case "$src" in \#*) continue ;; esac
+            if [ -n "$ONLY" ] && [[ "$src" != *"$ONLY"* ]]; then continue; fi
+            dst="$ACR_REGISTRY/$ACR_NAMESPACE/${src##*/}"   # docker.io/alexgshaw/fix-git:20260403 -> <registry>/<ns>/fix-git:20260403
+            # A manifest is pushed last, so one that exists in ACR belongs to a complete copy. The tags
+            # are dated and not reused upstream, so an existing copy is not fetched again; this keeps
+            # reruns from spending Docker Hub pulls.
+            have=$(skopeo inspect --raw "docker://$dst" 2>/dev/null | sha256sum | cut -d' ' -f1)
+            if [ "$have" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+              echo "skip  $src (already in ACR)"; skipped=$((skipped+1))
+              printf '%s\t%s\tsha256:%s\tskipped\n' "$src" "$dst" "$have" >> report.tsv; continue
+            fi
+            echo "copy  $src -> $dst"
+            # --preserve-digests: fail rather than store a copy whose digest differs from the source
+            if skopeo copy --all --preserve-digests --retry-times 3 --digestfile digest.txt "docker://$src" "docker://$dst"; then
+              ok=$((ok+1)); printf '%s\t%s\t%s\tcopied\n' "$src" "$dst" "$(cat digest.txt)" >> report.tsv
+            else
+              echo "::error::copy failed for $src"; failed=$((failed+1)); printf '%s\t%s\t\tcopy failed\n' "$src" "$dst" >> report.tsv
+            fi
+          done 3< acr-mirror/images.txt
+          echo "copied $ok, skipped $skipped, failed $failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$failed" -eq 0 ]
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-report
+          path: report.tsv
