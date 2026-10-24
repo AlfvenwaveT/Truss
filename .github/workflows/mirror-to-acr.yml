@@ -34,8 +34,11 @@ jobs:
       ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
       ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
       ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+      # skopeo keeps logins in this file; its default (/run/containers/<uid>/ when XDG_RUNTIME_DIR is
+      # unset) may not be writable on a hosted runner
+      REGISTRY_AUTH_FILE: ${{ runner.temp }}/containers-auth.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install skopeo
         run: |
@@ -50,10 +53,36 @@ jobs:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          test -n "$ACR_REGISTRY" && test -n "$ACR_NAMESPACE" || { echo "set the ACR_REGISTRY and ACR_NAMESPACE variables"; exit 1; }
-          echo "$ACR_PASSWORD" | skopeo login --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY"
+          # Problems are reported as ::error:: annotations (readable on the run page and through the
+          # API). Values of secrets are never printed, only whether they are set.
+          fail=0
+          check() {  # check NAME KIND VALUE
+            if [ -z "$3" ]; then
+              echo "::error title=$1 is missing::Add $1 under Settings > Secrets and variables > Actions > $2."; fail=1
+            elif [[ "$3" =~ ^[[:space:]] || "$3" =~ [[:space:]]$ ]]; then
+              echo "::error title=$1 has spaces::$1 starts or ends with a space or line break; paste it again without them."; fail=1
+            fi
+          }
+          check ACR_REGISTRY Variables "$ACR_REGISTRY"
+          check ACR_NAMESPACE Variables "$ACR_NAMESPACE"
+          check ACR_USERNAME Secrets "$ACR_USERNAME"
+          check ACR_PASSWORD Secrets "$ACR_PASSWORD"
+          if [[ "$ACR_REGISTRY" == *://* || "$ACR_REGISTRY" == */* ]]; then
+            echo "::error title=ACR_REGISTRY format::Use only the host name, e.g. crpi-xxxx.cn-hangzhou.personal.cr.aliyuncs.com (no https://, no namespace)."; fail=1
+          fi
+          echo "registry=$ACR_REGISTRY namespace=$ACR_NAMESPACE repository=${ACR_REPOSITORY:-<one per image>}"
+          [ "$fail" -eq 0 ] || exit 1
+          if ! out=$(printf '%s' "$ACR_PASSWORD" | skopeo login --username "$ACR_USERNAME" --password-stdin "$ACR_REGISTRY" 2>&1); then
+            echo "::error title=ACR login failed::${out//$'\n'/ }"
+            exit 1
+          fi
+          echo "ACR: $out"
           if [ -n "$DOCKERHUB_USERNAME" ]; then
-            echo "$DOCKERHUB_TOKEN" | skopeo login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+            if out=$(printf '%s' "$DOCKERHUB_TOKEN" | skopeo login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io 2>&1); then
+              echo "Docker Hub: $out"
+            else  # optional: carry on anonymously
+              echo "::warning title=Docker Hub login failed, pulling anonymously::${out//$'\n'/ }"
+            fi
           fi
 
       - name: Copy images
@@ -94,7 +123,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mirror-report
           path: report.tsv
