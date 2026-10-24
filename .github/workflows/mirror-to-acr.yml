@@ -34,9 +34,6 @@ jobs:
       ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
       ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
       ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
-      # skopeo keeps logins in this file; its default (/run/containers/<uid>/ when XDG_RUNTIME_DIR is
-      # unset) may not be writable on a hosted runner
-      REGISTRY_AUTH_FILE: ${{ runner.temp }}/containers-auth.json
     steps:
       - uses: actions/checkout@v7
 
@@ -45,6 +42,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq skopeo
           skopeo --version
+          # skopeo keeps logins in this file; its default (/run/containers/<uid>/ when XDG_RUNTIME_DIR
+          # is unset) may not be writable on a hosted runner. Set here because the runner context is
+          # not available in job-level env.
+          echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/containers-auth.json" >> "$GITHUB_ENV"
 
       - name: Log in to ACR (and Docker Hub if configured)
         env:
