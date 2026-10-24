@@ -4,16 +4,17 @@
 # so it uses these local copies and never goes to Docker Hub.
 #
 #   docker login --username=<ACR login name> <ACR_REGISTRY>    # once
-#   ACR_REGISTRY=registry.cn-hangzhou.aliyuncs.com ACR_NAMESPACE=<ns> ./pull-from-acr.sh [list] [filter]
+#   ACR_REGISTRY=<address> ACR_NAMESPACE=<ns> [ACR_REPOSITORY=<repo>] ./pull-from-acr.sh [list] [filter]
 #
 #   list    image list, default images.txt next to this script (one docker.io/alexgshaw/... per line)
 #   filter  pull only references containing this text, e.g. a task name
+#   ACR_REPOSITORY  set it if the workflow put every image in one repository (tag <task>-<tag>)
 #   REPORT  optional path to the workflow's report.tsv: each pulled image's digest must match it
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 list="${1:-$here/images.txt}"
 only="${2:-}"
-: "${ACR_REGISTRY:?set ACR_REGISTRY, e.g. registry.cn-hangzhou.aliyuncs.com}"
+: "${ACR_REGISTRY:?set ACR_REGISTRY, the address in the ACR docker login command}"
 : "${ACR_NAMESPACE:?set ACR_NAMESPACE}"
 report="${REPORT:-}"
 
@@ -23,7 +24,12 @@ while read -r src <&3; do
   case "$src" in \#*) continue ;; esac
   if [ -n "$only" ] && [[ "$src" != *"$only"* ]]; then continue; fi
   name="${src#docker.io/}"                              # alexgshaw/fix-git:20260403, as in task.toml
-  acr="$ACR_REGISTRY/$ACR_NAMESPACE/${src##*/}"         # <registry>/<ns>/fix-git:20260403
+  name_tag="${src##*/}"                                 # fix-git:20260403
+  if [ -n "${ACR_REPOSITORY:-}" ]; then
+    acr="$ACR_REGISTRY/$ACR_NAMESPACE/$ACR_REPOSITORY:${name_tag/:/-}"   # <registry>/<ns>/<repo>:fix-git-20260403
+  else
+    acr="$ACR_REGISTRY/$ACR_NAMESPACE/$name_tag"                         # <registry>/<ns>/fix-git:20260403
+  fi
   if docker image inspect "$name" >/dev/null 2>&1; then
     echo "present  $name"; present=$((present+1)); continue
   fi

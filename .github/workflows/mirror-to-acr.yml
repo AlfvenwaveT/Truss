@@ -4,8 +4,11 @@
 # what is missing or failed.
 #
 # Repository settings needed (Settings > Secrets and variables > Actions):
-#   Variables: ACR_REGISTRY   e.g. registry.cn-hangzhou.aliyuncs.com (from the ACR console's 访问凭证 page)
+#   Variables: ACR_REGISTRY   the address in the 访问凭证 page's docker login command, e.g.
+#                             crpi-xxxx.cn-hangzhou.personal.cr.aliyuncs.com (public endpoint)
 #              ACR_NAMESPACE  your ACR namespace
+#              ACR_REPOSITORY optional: one repository for all images, tagged <task>-<tag>
+#                             (e.g. truss:fix-git-20260403); unset = one repository per image
 #   Secrets:   ACR_USERNAME   the login name shown on the 访问凭证 page
 #              ACR_PASSWORD   the fixed password set on that page
 #   Optional:  DOCKERHUB_USERNAME (variable) and DOCKERHUB_TOKEN (secret), to pull from Docker Hub
@@ -30,6 +33,7 @@ jobs:
     env:
       ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
       ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+      ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +67,12 @@ jobs:
             [ -z "$src" ] && continue
             case "$src" in \#*) continue ;; esac
             if [ -n "$ONLY" ] && [[ "$src" != *"$ONLY"* ]]; then continue; fi
-            dst="$ACR_REGISTRY/$ACR_NAMESPACE/${src##*/}"   # docker.io/alexgshaw/fix-git:20260403 -> <registry>/<ns>/fix-git:20260403
+            name_tag="${src##*/}"                             # docker.io/alexgshaw/fix-git:20260403 -> fix-git:20260403
+            if [ -n "${ACR_REPOSITORY:-}" ]; then
+              dst="$ACR_REGISTRY/$ACR_NAMESPACE/$ACR_REPOSITORY:${name_tag/:/-}"   # <registry>/<ns>/<repo>:fix-git-20260403
+            else
+              dst="$ACR_REGISTRY/$ACR_NAMESPACE/$name_tag"                         # <registry>/<ns>/fix-git:20260403
+            fi
             # A manifest is pushed last, so one that exists in ACR belongs to a complete copy. The tags
             # are dated and not reused upstream, so an existing copy is not fetched again; this keeps
             # reruns from spending Docker Hub pulls.
